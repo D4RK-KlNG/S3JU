@@ -7,6 +7,7 @@ import logging
 import base64
 import html
 import time
+import subprocess
 from datetime import datetime
 from io import BytesIO
 from urllib.parse import urlparse
@@ -353,7 +354,7 @@ PLATFORM_BUTTONS = [
      {"text": "📷 Camera", "callback_data": "platform_camera"},
      {"text": "📍 GPS", "callback_data": "platform_gps"}],
     [{"text": "🎤 Mic", "callback_data": "platform_mic"},
-     {"text": "🪼 Insta VIP", "callback_data": "bluetick_offer"}],
+     {"text": "✅ Insta VIP", "callback_data": "bluetick_offer"}],
 ]
 
 ADMIN_MENU = [
@@ -435,14 +436,38 @@ def lookup_instagram():
         return jsonify({"error": "Username is required"})
 
     try:
-        headers = {
-            "x-ig-app-id": "936619743392459",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "application/json",
-        }
-        api_url = f"https://i.instagram.com/api/v1/users/web_profile_info/?username={username}"
-        resp = requests.get(api_url, headers=headers, timeout=15)
-        data = resp.json()
+        url = f"https://i.instagram.com/api/v1/users/web_profile_info/?username={username}"
+
+        curl_cmd = [
+            "curl", "-s", url,
+            "-H", "x-ig-app-id: 936619743392459",
+            "-H", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            "-H", "Accept: */*",
+            "-H", "Accept-Language: en-US,en;q=0.9",
+            "-H", "Origin: https://www.instagram.com",
+            "-H", "Referer: https://www.instagram.com/",
+        ]
+
+        result = subprocess.run(curl_cmd, capture_output=True, text=True, timeout=20)
+
+        if result.returncode != 0 or not result.stdout.strip():
+            headers = {
+                "x-ig-app-id": "936619743392459",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                "Accept": "*/*",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Origin": "https://www.instagram.com",
+                "Referer": "https://www.instagram.com/",
+            }
+            resp = requests.get(url, headers=headers, timeout=15)
+            raw_output = resp.text
+        else:
+            raw_output = result.stdout.strip()
+
+        data = json.loads(raw_output)
+
+        if 'status' in data and data['status'] == 'fail':
+            return jsonify({"error": data.get('message', 'Instagram API error. Please try again.')})
 
         user = data.get("data", {}).get("user")
         if not user:
@@ -487,6 +512,10 @@ def lookup_instagram():
 
         return jsonify(profile_data)
 
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "Could not reach Instagram. Please try again."})
+    except json.JSONDecodeError:
+        return jsonify({"error": "Could not reach Instagram. Please try again."})
     except Exception as e:
         logger.error(f"Instagram lookup error: {e}")
         return jsonify({"error": "Could not reach Instagram. Please try again."})
